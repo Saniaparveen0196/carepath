@@ -1,0 +1,37 @@
+id,name,specialty,years,provider_id
+summit-multispeciality-hospital-bengaluru-dr1,Dr. A. Mehta,Neurosurgery,10,summit-multispeciality-hospital-bengaluru
+summit-multispeciality-hospital-bengaluru-dr2,Dr. B. Rao,Neurosurgery,9,summit-multispeciality-hospital-bengaluru
+aurora-heart-institute-delhi-dr1,Dr. B. Khan,Neurosurgery,12,aurora-heart-institute-delhi
+aurora-heart-institute-delhi-dr2,Dr. A. Das,General Surgery,25,aurora-heart-institute-delhi
+sunrise-heart-institute-mumbai-dr1,Dr. D. Das,Neurosurgery,32,sunrise-heart-institute-mumbai
+sunrise-heart-institute-mumbai-dr2,Dr. C. Mehta,Cosmetic,19,sunrise-heart-institute-mumbai
+harbor-multispeciality-hospital-chennai-dr1,Dr. A. Rao,Neurosurgery,13,harbor-multispeciality-hospital-chennai
+harbor-multispeciality-hospital-chennai-dr2,Dr. C. Iyer,Cosmetic,21,harbor-multispeciality-hospital-chennai
+lakeview-heart-institute-hyderabad-dr1,Dr. D. Rao,Cardiac,38,lakeview-heart-institute-hyderabad
+lakeview-heart-institute-hyderabad-dr2,Dr. C. Mehta,Cardiac,9,lakeview-heart-institute-hyderabad
+harbor-super-speciality-hospital-pune-dr1,Dr. D. Rao,Ophthalmology,32,harbor-super-speciality-hospital-pune
+harbor-super-speciality-hospital-pune-dr2,Dr. C. Iyer,Ophthalmology,20,harbor-super-speciality-hospital-pune
+maple-super-speciality-hospital-bengaluru-dr1,Dr. D. Iyer,Cardiac,10,maple-super-speciality-hospital-bengaluru
+maple-super-speciality-hospital-bengaluru-dr2,Dr. B. Iyer,Ophthalmology,29,maple-super-speciality-hospital-bengaluru
+greenfield-heart-institute-delhi-dr1,Dr. C. Iyer,Orthopaedics,22,greenfield-heart-institute-delhi
+greenfield-heart-institute-delhi-dr2,Dr. D. Mehta,Neurosurgery,20,greenfield-heart-institute-delhi
+riverside-super-speciality-hospital-mumbai-dr1,Dr. A. Rao,Cardiac,25,riverside-super-speciality-hospital-mumbai
+riverside-super-speciality-hospital-mumbai-dr2,Dr. A. Khan,Orthopaedics,10,riverside-super-speciality-hospital-mumbai
+greenfield-super-speciality-hospital-chennai-dr1,Dr. D. Khan,Cardiac,12,greenfield-super-speciality-hospital-chennai
+greenfield-super-speciality-hospital-chennai-dr2,Dr. A. Khan,General Surgery,23,greenfield-super-speciality-hospital-chennai
+greenfield-medical-centre-hyderabad-dr1,Dr. C. Iyer,Urology,32,greenfield-medical-centre-hyderabad
+greenfield-medical-centre-hyderabad-dr2,Dr. B. Das,Urology,28,greenfield-medical-centre-hyderabad
+greenfield-multispeciality-hospital-pune-dr1,Dr. C. Mehta,General Surgery,14,greenfield-multispeciality-hospital-pune
+greenfield-multispeciality-hospital-pune-dr2,Dr. C. Mehta,Urology,38,greenfield-multispeciality-hospital-pune
+summit-heart-institute-bengaluru-dr1,Dr. C. Rao,Cardiac,37,summit-heart-institute-bengaluru
+summit-heart-institute-bengaluru-dr2,Dr. D. Iyer,Cosmetic,36,summit-heart-institute-bengaluru
+sunrise-super-speciality-hospital-delhi-dr1,Dr. B. Rao,Cardiac,26,sunrise-super-speciality-hospital-delhi
+sunrise-super-speciality-hospital-delhi-dr2,Dr. D. Iyer,Cosmetic,29,sunrise-super-speciality-hospital-delhi
+willow-multispeciality-hospital-mumbai-dr1,Dr. A. Khan,Ophthalmology,17,willow-multispeciality-hospital-mumbai
+willow-multispeciality-hospital-mumbai-dr2,Dr. B. Das,Urology,16,willow-multispeciality-hospital-mumbai
+willow-super-speciality-hospital-chennai-dr1,Dr. B. Das,Orthopaedics,35,willow-super-speciality-hospital-chennai
+willow-super-speciality-hospital-chennai-dr2,Dr. D. Iyer,Orthopaedics,32,willow-super-speciality-hospital-chennai
+sunrise-multispeciality-hospital-hyderabad-dr1,Dr. A. Das,Orthopaedics,15,sunrise-multispeciality-hospital-hyderabad
+sunrise-multispeciality-hospital-hyderabad-dr2,Dr. B. Khan,Orthopaedics,32,sunrise-multispeciality-hospital-hyderabad
+willow-heart-institute-pune-dr1,Dr. C. Mehta,Cosmetic,24,willow-heart-institute-pune
+willow-heart-institute-pune-dr2,Dr. B. Das,General Surgery,37,willow-heart-institute-pune

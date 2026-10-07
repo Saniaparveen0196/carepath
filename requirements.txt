@@ -1,0 +1,10 @@
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+tqdm>=4.66
+sentence-transformers>=3.0
+chromadb>=0.5
+rank-bm25>=0.2.2
+anthropic>=0.40
+openai>=1.50
+python-dotenv>=1.0
