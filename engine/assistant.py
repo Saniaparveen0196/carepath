@@ -3,7 +3,10 @@ import json
 import os
 import re
 
+import threading
+
 from .cities import mentioned_cities
+from .intake import IntakeFlow, deliver
 from .llm import call_llm
 from .ranking import find_procedure, rank
 from .workspace import Workspace
@@ -42,6 +45,14 @@ PERSONAL_PATTERNS = re.compile(
     r"\bshould\s+(i|he|she|we)\s+(get|have|undergo|go for)\s+(a |an |the )?"
     r"(surgery|operation|stent|bypass|angioplasty)\b|"
     r"\b\d{1,3}\s?%\s+(blockage|block|stenosis|blocked))", re.I)
+
+INTAKE_INTENT = re.compile(
+    r"\b(call me( back)?|call back|callback|contact me|get in touch|reach out to me|"
+    r"book (an? )?(appointment|consultation|slot|visit)|schedule (an? )?(appointment|consultation|visit)|"
+    r"(talk|speak) (to|with) (someone|a person|an? (agent|counsell?or|coordinator|human|representative|doctor))|"
+    r"connect me|get (an? )?(quote|estimate)|send me (an? )?(quote|estimate)|arrange (an? )?(appointment|call)|"
+    r"i('d| would) like (to )?(book|speak|talk|be contacted)|want to (book|be contacted)|"
+    r"have (someone|the team) (call|contact))\b", re.I)
 
 MED_WORDS = re.compile(
     r"\b(dose|doses|dosage|dosing|mg|milligrams?|tablets?|pills?|capsules?|medicines?|medications?|drugs?|"
@@ -280,6 +291,7 @@ class Assistant:
     def ranking_passages(self, flt):
         res = rank(self.ws, flt["treatment"], flt["city"], flt["require"], k=5)
         passages = []
+        self._shown = [r["provider"]["id"] for r in res["results"]]
         if res["procedure"]:
             pp = self.procedure_passage(res["procedure"]["name"])
             if pp:
@@ -294,11 +306,60 @@ class Assistant:
                              "text": f"RANKING #{i}: {h['name']} ({h['city']}), table score {r['score']:.0f}/100. Facts: {facts}{miss}."})
         return passages, res["note"]
 
+    # ---------- stateful entry (used by the web server and the chat CLI) ----------
+    sync_delivery = False
+
+    def _flow(self):
+        if self.sync_delivery:
+            return IntakeFlow(self.ws, self)
+        def background(ws, lead):
+            threading.Thread(target=deliver, args=(ws, lead), daemon=True).start()
+            return lead
+        return IntakeFlow(self.ws, self, deliver_fn=background)
+
+    def _intake_meta(self):
+        self.last_route = "intake"
+        self.last_meta = {"route": "intake", "filters": None, "retried": False, "first_draft_bad": [],
+                          "ungrounded": [], "llm_calls": 0, "procedure": None, "city": None,
+                          "shown_providers": []}
+
+    def converse(self, question, session):
+        """Like answer(), but keeps per-session state: the lead-intake flow and what was discussed.
+        Returns {"text", "sources", "quick_replies"}; `session` is a dict owned by the caller."""
+        session.setdefault("history", [])
+        ctx = session.setdefault("context", {"topics": []})
+        if EMERGENCY_PATTERNS.search(question):
+            session["intake"] = None                       # an emergency always interrupts any intake
+        elif session.get("intake"):
+            res = self._flow().handle(session["intake"], question)
+            session["intake"] = res["state"]
+            self._intake_meta()
+            return {"text": res["reply"], "sources": [], "quick_replies": res["quick"]}
+        elif self.ws.config["handoff"]["enabled"] and INTAKE_INTENT.search(question):
+            res = self._flow().start(ctx, session.get("sid", ""))
+            session["intake"] = res["state"]
+            self._intake_meta()
+            return {"text": res["reply"], "sources": [], "quick_replies": res["quick"]}
+
+        text, sources, hist = self.answer(question, session["history"])
+        session["history"] = hist
+        m = self.last_meta
+        for key in ("procedure", "city"):
+            if m.get(key):
+                ctx[key] = m[key]
+        if m.get("shown_providers"):
+            ctx["shown_providers"] = m["shown_providers"]
+        if m.get("procedure") and m["procedure"] not in ctx["topics"]:
+            ctx["topics"].append(m["procedure"])
+        return {"text": text, "sources": sources, "quick_replies": []}
+
     # ---------- main entry ----------
     def answer(self, question, history, doc_type=None):
         """Returns (text, sources, new_history). self.last_route / self.last_meta say how it was answered."""
         self.last_meta = {"route": None, "filters": None, "retried": False,
-                          "first_draft_bad": [], "ungrounded": [], "llm_calls": 0}
+                          "first_draft_bad": [], "ungrounded": [], "llm_calls": 0,
+                          "procedure": None, "city": None, "shown_providers": []}
+        self._shown = []
         if EMERGENCY_PATTERNS.search(question):
             self.last_route = self.last_meta["route"] = "emergency"
             return self.emergency_reply, [], history
@@ -326,10 +387,12 @@ class Assistant:
                 search_q = f"{prev[-1]} {question}"
 
         passages, note, no_match, fact_proc = [], None, False, None
+        ctx_kw = self.keyword_filters(search_q)
+        self.last_meta["procedure"], self.last_meta["city"] = ctx_kw["treatment"], ctx_kw["city"]
         if RECO_HINT.search(search_q):
             flt = self.extract_filters(search_q)
             self.last_route = f"recommender {flt}"
-            self.last_meta.update(route="recommender", filters=flt)
+            self.last_meta.update(route="recommender", filters=flt, procedure=flt["treatment"], city=flt["city"])
             if flt["unknown_city"]:
                 cities = ", ".join(sorted({p["city"] for p in self.ws.providers}))
                 note = (f"No providers are listed in {flt['unknown_city']}. "
@@ -350,6 +413,7 @@ class Assistant:
                         fact_proc = find_procedure(self.ws, kw["treatment"])
                         self.last_route = "documents + procedure summary"
 
+        self.last_meta["shown_providers"] = list(self._shown)
         if no_match and note:                    # nothing to rank: say so directly, no LLM needed
             text = (f"{note} You can also contact the {self.ws.config['name']} team for help "
                     "finding the right option.")

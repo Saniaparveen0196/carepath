@@ -95,6 +95,9 @@
     ".src{margin-top:8px;padding-top:6px;border-top:1px solid #e8edf4;font-size:12px}" +
     ".src a{color:" + color + ";display:block;margin:2px 0;text-decoration:none}.src a:hover{text-decoration:underline}" +
     ".err{color:#b42318}.typing{color:#6b7a90;font-style:italic}" +
+    ".qr{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}" +
+    ".qr button{border:1px solid " + color + ";background:#fff;color:" + color + ";border-radius:16px;padding:6px 12px;font-size:13px;cursor:pointer}" +
+    ".qr button:hover{background:" + color + ";color:#fff}" +
     ".ft{display:flex;gap:8px;padding:10px;border-top:1px solid #e1e6ee;background:#fff}" +
     ".ft input{flex:1;border:1px solid #cdd6e3;border-radius:20px;padding:10px 14px;font-size:14px;outline:none}" +
     ".ft input:focus{border-color:" + color + "}" +
@@ -146,9 +149,29 @@
     el.appendChild(box);
   }
 
-  function ask() {
-    var q = input.value.trim();
+  function clearChips() {
+    var old = msgs.querySelectorAll(".qr");
+    for (var i = 0; i < old.length; i++) old[i].remove();
+  }
+
+  function addChips(list) {
+    if (!list || !list.length) return;
+    var box = document.createElement("div");
+    box.className = "qr";
+    list.forEach(function (label) {
+      var b = document.createElement("button");
+      b.textContent = label;
+      b.addEventListener("click", function () { ask(label); });
+      box.appendChild(b);
+    });
+    msgs.appendChild(box);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  function ask(preset) {
+    var q = (typeof preset === "string" ? preset : input.value).trim();
     if (!q || send.disabled) return;
+    clearChips();
     input.value = "";
     add("u", esc(q));
     send.disabled = true;
@@ -171,6 +194,7 @@
       try { sessionStorage.setItem("pg_sid_" + ws, sid); } catch (e) {}
       var el = add("b", md(res.body.answer));
       addSources(el, res.body.sources);
+      addChips(res.body.quick_replies);
     }).catch(function () {
       wait.remove();
       add("b err", "Could not reach the assistant. Please check your connection and try again.");
@@ -185,7 +209,7 @@
     if (panel.classList.contains("open")) input.focus();
   });
   $(".x").addEventListener("click", function () { panel.classList.remove("open"); });
-  send.addEventListener("click", ask);
+  send.addEventListener("click", function () { ask(); });
   input.addEventListener("keydown", function (e) { if (e.key === "Enter") ask(); });
 
   add("b", "Hi! I can help you compare hospitals and understand treatments. " +

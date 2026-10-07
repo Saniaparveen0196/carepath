@@ -8,6 +8,9 @@ Usage:
     python cli.py rank demo --procedure bypass --city delhi --require JCI
     python cli.py ingest demo                # build the document index (downloads models once)
     python cli.py chat demo                  # talk to the assistant
+    python cli.py leads demo                 # list captured leads (phone numbers masked)
+    python cli.py leads-deliver demo         # retry delivery of pending leads to the webhook
+    python cli.py leads-purge demo           # delete leads older than handoff.retention_days
     python cli.py eval-init demo             # generate evaluation cases from the workspace data
     python cli.py eval demo --offline        # run the model-free layers (seconds)
     python cli.py eval demo                  # run everything (needs models + LLM key)
@@ -25,7 +28,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 ap = argparse.ArgumentParser()
 sub = ap.add_subparsers(dest="cmd", required=True)
 for name in ("init", "import-csv", "import-legacy", "import-pages", "validate", "rank", "ingest", "chat",
-             "eval-init", "eval"):
+             "eval-init", "eval", "leads", "leads-deliver", "leads-purge"):
     p = sub.add_parser(name)
     p.add_argument("workspace")
     if name == "rank":
@@ -76,16 +79,18 @@ elif a.cmd == "chat":
     from engine.assistant import Assistant
     from engine.knowledge import Retriever
     print(f"Loading {ws.config['name']}...")
-    bot, history = Assistant(ws, Retriever(ws)), []
+    bot, session = Assistant(ws, Retriever(ws)), {"sid": "cli"}
     print("Ask about treatments, hospitals, or doctors. Type 'quit' to exit.\n")
     while True:
         q = input("You: ").strip()
         if q.lower() in {"quit", "exit", ""}:
             break
-        text, sources, history = bot.answer(q, history)
-        print(f"\nAssistant: {text}\n")
-        for i, title, url in sources:
+        out = bot.converse(q, session)
+        print(f"\nAssistant: {out['text']}\n")
+        for i, title, url in out["sources"]:
             print(f"  [{i}] {title}" + (f" - {url}" if url else ""))
+        if out["quick_replies"]:
+            print("  options: " + " | ".join(out["quick_replies"]))
         print(f"  (route: {bot.last_route})\n")
 elif a.cmd == "eval-init":
     from engine.evaluation import write_cases
@@ -115,3 +120,17 @@ elif a.cmd == "eval":
               f"{' regressions' if regs else ''})")
         sys.exit(1)
     print("\nGATE: PASSED")
+elif a.cmd in ("leads", "leads-deliver", "leads-purge"):
+    from engine.intake import LeadStore, deliver_pending, mask_phone
+    store = LeadStore(ws)
+    if a.cmd == "leads":
+        rows = store.all()
+        print(f"{len(rows)} lead(s)")
+        for l in rows:
+            print(f"  {l['id']}  {l['created_at']}  {l['status']:9s} {mask_phone(l['contact']['phone'])}  "
+                  f"{l['interest']['procedure']} / {l['interest']['city']}  ({l['preferences']['urgency']})")
+    elif a.cmd == "leads-deliver":
+        print(f"delivered {deliver_pending(ws)} pending lead(s)")
+    else:
+        days = ws.config["handoff"]["retention_days"]
+        print(f"deleted {store.purge(days)} lead(s) older than {days} days")

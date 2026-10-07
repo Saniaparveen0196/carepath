@@ -29,8 +29,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from engine.intake import deliver_pending
 from engine.ranking import rank
-from engine.workspace import Workspace
+from engine.workspace import ROOT, Workspace
 
 log = logging.getLogger("engine")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -109,7 +110,8 @@ def rate_limit(request: Request):
             _hits.pop(k, None)
 
 
-def session_history(name, sid):
+def get_session(name, sid):
+    """The per-conversation state: chat history, what was discussed, and any active lead intake."""
     now = time.time()
     if len(_sessions) > MAX_SESSIONS:
         for k in [k for k, v in _sessions.items() if now - v["ts"] > SESSION_TTL]:
@@ -117,9 +119,10 @@ def session_history(name, sid):
         if len(_sessions) > MAX_SESSIONS:
             _sessions.clear()
     s = _sessions.get((name, sid))
-    if s and now - s["ts"] > SESSION_TTL:
-        s = None
-    return s["history"] if s else []
+    if s is None or now - s["ts"] > SESSION_TTL:
+        s = {"history": [], "context": {"topics": []}, "intake": None, "sid": sid, "ts": now}
+        _sessions[(name, sid)] = s
+    return s
 
 
 def safe_url(u):
@@ -157,11 +160,11 @@ def chat(workspace: str, body: ChatIn, request: Request, x_api_key: Optional[str
     rate_limit(request)
 
     sid = body.session_id if body.session_id and SID_RE.match(body.session_id) else uuid.uuid4().hex
-    history = session_history(workspace, sid)
+    session = get_session(workspace, sid)
     bot = get_bot(workspace)
     try:
         with _locks[workspace]:                  # the assistant keeps per-call state; one at a time
-            text, sources, new_history = bot.answer(body.message.strip(), history)
+            out = bot.converse(body.message.strip(), session)
             route = bot.last_route.split(" ")[0] if bot.last_route else ""
     except HTTPException:
         raise
@@ -169,12 +172,13 @@ def chat(workspace: str, body: ChatIn, request: Request, x_api_key: Optional[str
         log.exception("chat failed for workspace=%s", workspace)
         raise HTTPException(502, "The assistant is temporarily unavailable. Please try again.")
 
-    _sessions[(workspace, sid)] = {"history": new_history, "ts": time.time()}
+    session["ts"] = time.time()
     log.info("chat workspace=%s route=%s len=%d", workspace, route, len(body.message))   # no message text logged
     return {
         "session_id": sid,
-        "answer": text,
-        "sources": [{"n": n, "title": t, "url": safe_url(u)} for n, t, u in sources],
+        "answer": out["text"],
+        "sources": [{"n": n, "title": t, "url": safe_url(u)} for n, t, u in out["sources"]],
+        "quick_replies": out["quick_replies"],
     }
 
 
@@ -198,6 +202,24 @@ def rank_endpoint(workspace: str, request: Request, procedure: Optional[str] = N
             "price_min": r["price_min"], "price_max": r["price_max"],
         } for r in res["results"]],
     }
+
+
+# ---------------------------------------------------------------- lead redelivery
+def _redeliver_loop():
+    while True:
+        time.sleep(60)
+        try:
+            for d in ROOT.glob("*"):
+                ws = Workspace(d.name)
+                if ws.config["handoff"].get("webhook_url"):
+                    deliver_pending(ws)
+        except Exception:
+            log.exception("redelivery pass failed")
+
+
+@app.on_event("startup")
+def _start_background():
+    threading.Thread(target=_redeliver_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------- static

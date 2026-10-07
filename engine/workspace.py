@@ -22,6 +22,16 @@ DEFAULT_CONFIG = {
         "missing_penalty": 0.30,    # how much a score depends on data completeness
         "expert_years_cap": 40,
     },
+    "handoff": {
+        "enabled": True,
+        "webhook_url": None,          # the customer's endpoint that receives qualified leads
+        "webhook_secret": None,       # used to sign each request (HMAC-SHA256)
+        "retention_days": 90,         # leads older than this are deleted by `cli.py leads-purge`
+        "consent_version": "v1",
+        "retry_delays": [0, 2, 6],    # seconds between delivery attempts
+        "max_attempts": 10,
+        "dedupe_minutes": 10,         # the same phone + treatment within this window is one lead
+    },
     "disclaimer": ("Scores combine listed facts only (ratings, accreditation, beds, doctors, "
                    "clinician experience). They are not medical advice, and no single score "
                    "means a provider is right for a specific patient."),

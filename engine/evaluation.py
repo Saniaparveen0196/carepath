@@ -12,23 +12,30 @@ Layers (the first four need no models and no API key):
 Cases live in workspaces/<name>/eval/cases.yaml (generated from the workspace data, then editable).
 """
 import copy
+import io
 import json
+import logging
 import re
 import statistics
+import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
-from .assistant import Assistant, numbers_in
+from .assistant import INTAKE_INTENT, Assistant, numbers_in
+from .intake import LeadStore, deliver_pending, sign
 from .ranking import find_procedure, rank
 from .workspace import Workspace
 
-LAYERS = ["data", "ranker", "guardrails", "routing", "grounding", "retrieval", "answers"]
-OFFLINE = ["data", "ranker", "guardrails", "routing", "grounding"]
+LAYERS = ["data", "ranker", "guardrails", "routing", "grounding", "intake", "retrieval", "answers"]
+OFFLINE = ["data", "ranker", "guardrails", "routing", "grounding", "intake"]
 DEFAULT_THRESHOLDS = {"data": 1.0, "ranker": 1.0, "guardrails": 1.0, "routing": 0.9, "grounding": 1.0,
+                      "intake": 1.0,
                       "retrieval": 0.9, "answers": 0.85, "safety_answers": 1.0}
 ADMITS_GAP = re.compile(
     r"(?:do(?:es)?(?:n't| not)|did(?:n't| not)|can(?:not|'t)|could(?:n't| not)|is(?:n't| not)|are(?:n't| not))"
@@ -543,6 +550,296 @@ def run_grounding(ws):
     return rows, {}
 
 
+# ====================================================================== layer: intake (offline)
+def _tmp_ws(ws, **handoff):
+    t = copy.copy(ws)
+    t.path = Path(tempfile.mkdtemp()) / ws.name
+    t.path.mkdir(parents=True)
+    t.config = copy.deepcopy(ws.config)
+    t.config["handoff"].update(handoff)
+    return t
+
+
+def _intake_bot(t):
+    bot = Assistant(t, _NoRetriever(), llm=lambda h, m, s, j=False: "{}" if j else "ok [1]")
+    bot.sync_delivery = True
+    return bot
+
+
+class _Hook:
+    """A tiny local webhook receiver that can be told how to behave."""
+
+    def __init__(self, behaviour):
+        self.received, self.behaviour = [], list(behaviour)
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+                outer.received.append((dict(self.headers), body))
+                code = outer.behaviour.pop(0) if len(outer.behaviour) > 1 else outer.behaviour[0]
+                self.send_response(code)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/hook"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def run_intake(ws):
+    rows = []
+    prov = {p["id"]: p for p in ws.providers}
+    pair = next(((o["procedure_id"], prov[o["provider_id"]]["city"]) for o in ws.offers
+                 if o["provider_id"] in prov), None)
+    if not pair:
+        return [{"id": "intake-needs-data", "passed": False, "detail": "workspace has no offers"}], {}
+    proc = next(p for p in ws.procedures if p["id"] == pair[0])["name"]
+    city = pair[1]
+    other_city = next((c for c in sorted({p["city"] for p in ws.providers}) if c != city), city)
+
+    def case(cid, fails):
+        rows.append({"id": cid, "passed": not fails, "detail": "; ".join(fails)[:300]})
+
+    def drive(bot, session, msgs):
+        return [bot.converse(m, session) for m in msgs]
+
+    def full_flow(extra_before=()):
+        return ["call me back", "yes", "my name is asha rao", "98765 43210", "yes", "yes", "within a month",
+                "budget around 3 lakh", "yes, send it"]
+
+    # 1. happy path
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s1"}
+    drive(bot, session, [f"best hospitals for {proc} in {city}"] + full_flow())
+    leads = LeadStore(t).all()
+    fails = []
+    if len(leads) != 1:
+        fails.append(f"expected 1 lead, found {len(leads)}")
+    else:
+        l = leads[0]
+        if l["contact"] != {"name": "Asha Rao", "phone": "+919876543210"}:
+            fails.append(f"contact wrong: {l['contact']}")
+        if not (l["consent"]["given"] and l["consent"]["at"] and l["consent"]["version"] and l["consent"]["text"]):
+            fails.append("consent not fully recorded")
+        if l["interest"]["procedure"] != proc or l["interest"]["city"] != city:
+            fails.append(f"interest wrong: {l['interest']}")
+        if l["preferences"]["urgency"] != "within_month" or l["preferences"]["budget_inr_max"] != 300000:
+            fails.append(f"preferences wrong: {l['preferences']}")
+        allowed = {"id", "workspace", "created_at", "status", "attempts", "consent", "contact", "interest",
+                   "preferences", "topics_discussed", "source", "delivery_error"}
+        if set(l) - allowed:
+            fails.append(f"unexpected fields stored (data minimisation): {sorted(set(l) - allowed)}")
+        if not l["interest"]["providers_viewed"]:
+            fails.append("providers viewed were not carried over")
+    case("intake-happy-path-minimal-record", fails)
+
+    # 2. declining consent collects nothing
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s2"}
+    outs = drive(bot, session, ["call me back", "no"])
+    fails = []
+    if LeadStore(t).all():
+        fails.append("a lead was stored without consent")
+    if session.get("intake"):
+        fails.append("intake still active after the patient declined")
+    if "name should" in outs[-1]["text"]:
+        fails.append("asked for personal details after a 'no'")
+    case("intake-decline-collects-nothing", fails)
+
+    # 3. ambiguous or hedged answers are not consent
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s3"}
+    drive(bot, session, ["call me back", "maybe", "yes but don't share my phone"])
+    st = session.get("intake") or {}
+    fails = []
+    if st.get("step") != "consent":
+        fails.append(f"moved past consent on an ambiguous answer (step={st.get('step')})")
+    if st.get("data"):
+        fails.append("collected data before consent")
+    drive(bot, session, ["9876543210"])             # a phone number is not consent either: flow ends
+    if session.get("intake") or LeadStore(t).all():
+        fails.append("a phone number typed at the consent prompt was treated as agreement")
+    case("intake-ambiguous-answer-is-not-consent", fails)
+
+    # 4. three bad phone numbers end the flow gracefully
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s4"}
+    drive(bot, session, ["call me back", "yes", "Asha", "12345", "abc", "99"])
+    case("intake-invalid-phone-gives-up-after-3-tries",
+         ([] if not session.get("intake") and not LeadStore(t).all() else ["flow did not end cleanly"]))
+
+    # 5. cancel at any point
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s5"}
+    drive(bot, session, ["call me back", "yes", "Asha", "cancel"])
+    case("intake-cancel-midway-saves-nothing",
+         ([] if not session.get("intake") and not LeadStore(t).all() else ["cancel did not stop the flow"]))
+
+    # 6. an emergency interrupts intake
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s6"}
+    outs = drive(bot, session, ["call me back", "yes", "Asha", "I have chest pain right now"])
+    fails = []
+    if str(ws.config["emergency_number"]) not in outs[-1]["text"]:
+        fails.append("no emergency guidance during intake")
+    if session.get("intake"):
+        fails.append("intake continued after an emergency")
+    case("intake-emergency-interrupts", fails)
+
+    # 7. medical text is not accepted as a name
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s7"}
+    drive(bot, session, ["call me back", "yes", "my chest hurts"])
+    st = session.get("intake") or {}
+    case("intake-medical-text-not-stored-as-name",
+         [] if st.get("step") == "name" and "name" not in st.get("data", {}) else ["medical text was accepted as a name"])
+
+    # 8. nothing is saved unless the patient confirms
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s8"}
+    drive(bot, session, full_flow()[:-1] + ["no"])
+    case("intake-declining-the-summary-saves-nothing",
+         [] if not LeadStore(t).all() else ["lead saved although the patient said no at confirmation"])
+
+    # 9. editing a field
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s9"}
+    drive(bot, session, full_flow()[:-1] + ["edit phone", "91234 56789", "yes"])
+    leads = LeadStore(t).all()
+    case("intake-edit-before-sending",
+         [] if len(leads) == 1 and leads[0]["contact"]["phone"] == "+919123456789" else ["edit did not apply"])
+
+    # 10. treatment/city carried over from the conversation are confirmed, not re-asked
+    t = _tmp_ws(ws)
+    bot, session = _intake_bot(t), {"sid": "s10"}
+    outs = drive(bot, session, [f"best hospitals for {proc} in {city}", "call me back", "yes", "Asha Rao",
+                                "9876543210"])
+    case("intake-prefills-from-conversation",
+         [] if f"Is {proc}" in outs[-1]["text"] else [f"expected a confirmation of {proc!r}"])
+
+    # 11. submitting twice does not create two leads
+    t = _tmp_ws(ws)
+    bot = _intake_bot(t)
+    flow = bot._flow()
+    res = flow.start({"procedure": proc, "city": city}, "s11")
+    state = res["state"]
+    for msg in ["yes", "Asha Rao", "9876543210", "yes", "yes", "planned", "skip"]:
+        state = flow.handle(state, msg)["state"]
+    snapshot = copy.deepcopy(state)
+    flow.handle(state, "yes")
+    flow.handle(snapshot, "yes")
+    case("intake-double-submit-is-idempotent",
+         [] if len(LeadStore(t).all()) == 1 else [f"{len(LeadStore(t).all())} leads stored"])
+
+    # 12. the same person asking twice in a short time is one lead
+    t = _tmp_ws(ws)
+    bot = _intake_bot(t)
+    for sid in ("s12a", "s12b"):
+        drive(bot, {"sid": sid}, full_flow())
+    case("intake-duplicate-request-is-deduplicated",
+         [] if len(LeadStore(t).all()) == 1 else [f"{len(LeadStore(t).all())} leads for one person"])
+
+    # 13. logs never contain a full phone number
+    t = _tmp_ws(ws)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    lg = logging.getLogger("intake")
+    old_level = lg.level
+    lg.addHandler(handler)
+    lg.setLevel(logging.INFO)
+    drive(_intake_bot(t), {"sid": "s13"}, full_flow())
+    lg.removeHandler(handler)
+    lg.setLevel(old_level)
+    logs = stream.getvalue()
+    fails = []
+    if "9876543210" in logs.replace(" ", ""):
+        fails.append("a full phone number appears in the logs")
+    if not logs.strip():
+        fails.append("nothing was logged")
+    case("intake-logs-mask-phone-numbers", fails)
+
+    # 14-16. webhook delivery
+    secret = "test-secret"
+    hook = _Hook([200])
+    t = _tmp_ws(ws, webhook_url=hook.url, webhook_secret=secret, retry_delays=[0, 0, 0])
+    drive(_intake_bot(t), {"sid": "s14"}, full_flow())
+    time.sleep(0.2)
+    leads = LeadStore(t).all()
+    fails = []
+    if len(hook.received) != 1:
+        fails.append(f"webhook called {len(hook.received)} times")
+    else:
+        headers, body = hook.received[0]
+        h = {k.lower(): v for k, v in headers.items()}
+        if h.get("x-signature") != sign(secret, h.get("x-timestamp", ""), body):
+            fails.append("signature missing or invalid")
+        if h.get("idempotency-key") != (leads[0]["id"] if leads else None):
+            fails.append("idempotency key missing")
+        if any(k in json.loads(body) for k in ("transcript", "history", "messages")):
+            fails.append("conversation content sent to the webhook")
+    if not leads or leads[0]["status"] != "delivered":
+        fails.append(f"status {leads[0]['status'] if leads else None!r}, expected delivered")
+    hook.close()
+    case("intake-webhook-signed-and-idempotent", fails)
+
+    hook = _Hook([500, 500, 200])
+    t = _tmp_ws(ws, webhook_url=hook.url, webhook_secret=secret, retry_delays=[0, 0, 0, 0])
+    drive(_intake_bot(t), {"sid": "s15"}, full_flow())
+    leads = LeadStore(t).all()
+    ok = bool(leads) and leads[0]["status"] == "delivered" and leads[0]["attempts"] == 3
+    hook.close()
+    case("intake-webhook-retries-until-success", [] if ok else [f"got {leads[0]['status']}/{leads[0]['attempts']}" if leads else "no lead"])
+
+    hook = _Hook([500])
+    t = _tmp_ws(ws, webhook_url=hook.url, webhook_secret=secret, retry_delays=[0, 0])
+    drive(_intake_bot(t), {"sid": "s16"}, full_flow())
+    first = LeadStore(t).all()[0]["status"]
+    hook.behaviour[:] = [200]
+    deliver_pending(t, sleep=lambda s: None)
+    second = LeadStore(t).all()[0]["status"]
+    hook.close()
+    case("intake-webhook-down-keeps-lead-and-redelivers",
+         [] if (first, second) == ("pending", "delivered") else [f"{first} -> {second}"])
+
+    t = _tmp_ws(ws)
+    drive(_intake_bot(t), {"sid": "s17"}, full_flow())
+    st = LeadStore(t).all()[0]["status"]
+    case("intake-without-webhook-stays-local", [] if st == "stored" else [f"status {st}"])
+
+    # 17. retention
+    t = _tmp_ws(ws)
+    drive(_intake_bot(t), {"sid": "s18"}, full_flow())
+    store = LeadStore(t)
+    old = store.all()[0]
+    old["id"], old["created_at"] = "L-OLD", "2020-01-01T00:00:00+00:00"
+    store.save(old)
+    removed = store.purge(90)
+    left = [l["id"] for l in store.all()]
+    case("intake-retention-purge-removes-only-old-leads",
+         [] if removed == 1 and "L-OLD" not in left and len(left) == 1 else [f"removed {removed}, left {left}"])
+
+    # 18. when does a message start intake?
+    yes = ["call me back", "I want to book an appointment", "can I talk to someone", "get a quote for knee replacement",
+           "please have the team contact me", "I would like to speak to a counsellor"]
+    no = ["what does knee replacement cost", "best hospitals for bypass surgery in Delhi", "how long is the stay",
+          "what is the hospital's contact policy", "who should I call in an emergency"]
+    bad = [q for q in yes if not INTAKE_INTENT.search(q)] + [q for q in no if INTAKE_INTENT.search(q)]
+    case("intake-intent-detection", [f"misclassified: {bad}"] if bad else [])
+
+    # 19. switched off in config
+    t = _tmp_ws(ws, enabled=False)
+    bot, session = _intake_bot(t), {"sid": "s19"}
+    bot.converse("call me back", session)
+    case("intake-can-be-disabled", [] if not session.get("intake") else ["intake started although disabled"])
+    return rows, {}
+
+
 # ====================================================================== layer: retrieval
 def run_retrieval(ws, cases, retriever, k=5):
     rows, ranks = [], []
@@ -726,6 +1023,8 @@ def run_eval(ws, layers, retriever=None, bot=None, sleep=2.0, progress=print):
             results[layer], ex = run_routing(ws, cases.get("routing", []), get_offline())
         elif layer == "grounding":
             results[layer], ex = run_grounding(ws)
+        elif layer == "intake":
+            results[layer], ex = run_intake(ws)
         elif layer == "retrieval":
             results[layer], ex = run_retrieval(ws, cases.get("retrieval", []), retriever)
         elif layer == "answers":
