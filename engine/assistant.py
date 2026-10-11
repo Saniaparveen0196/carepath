@@ -4,6 +4,7 @@ import os
 import re
 
 import threading
+import time
 
 from .cities import mentioned_cities
 from .intake import IntakeFlow, deliver
@@ -53,6 +54,11 @@ INTAKE_INTENT = re.compile(
     r"connect me|get (an? )?(quote|estimate)|send me (an? )?(quote|estimate)|arrange (an? )?(appointment|call)|"
     r"i('d| would) like (to )?(book|speak|talk|be contacted)|want to (book|be contacted)|"
     r"have (someone|the team) (call|contact))\b", re.I)
+
+MORE_DETAIL = re.compile(r"^\s*more detail on\b", re.I)
+FACT_COMPLEX = re.compile(
+    r"\b(robotic|vs|versus|compare|difference|types?|why|include|included|cover|covered|insurance|emi|loan|"
+    r"each|bilateral|partial|implants?|breakdown|detail|details)\b", re.I)
 
 MED_WORDS = re.compile(
     r"\b(dose|doses|dosage|dosing|mg|milligrams?|tablets?|pills?|capsules?|medicines?|medications?|drugs?|"
@@ -112,9 +118,16 @@ class Assistant:
         raw = llm or (lambda history, msg, system, json_mode=False:
                       call_llm(ws, history, msg, system, json_mode))
 
+        self._llm_s = self._ret_s = 0.0
+        self._cache, self._last_rank = {}, None
+
         def counted(history, msg, system, json_mode=False):
             self.last_meta["llm_calls"] = self.last_meta.get("llm_calls", 0) + 1
-            return raw(history, msg, system, json_mode)
+            t = time.perf_counter()
+            try:
+                return raw(history, msg, system, json_mode)
+            finally:
+                self._llm_s += time.perf_counter() - t
         self.llm = counted
         self.system = system_prompt(ws)
         self.last_route = ""
@@ -196,14 +209,22 @@ class Assistant:
     # ---------- filters ----------
     def keyword_filters(self, question):
         q, ws = question.lower(), self.ws
-        best, best_key = None, (0, 0)
-        for p in ws.procedures:
-            words = [w for w in re.findall(r"[a-z]+", p["name"].lower())
-                     if len(w) >= 4 and w not in GENERIC_WORDS]
-            score = sum(1 for w in words if w in q)
-            key = (score, -len(p["name"]))
-            if score > 0 and key > best_key:
-                best, best_key = p["name"], key
+        # 1) the full procedure name appears in the question: the longest such name wins
+        qn = re.sub(r"[^a-z0-9]", "", q)
+        exact = [p for p in ws.procedures
+                 if len(re.sub(r"[^a-z0-9]", "", p["name"].lower())) >= 4
+                 and re.sub(r"[^a-z0-9]", "", p["name"].lower()) in qn]
+        best = max(exact, key=lambda p: len(p["name"]))["name"] if exact else None
+        # 2) otherwise score whole-word matches; prefer the name that is most completely covered
+        if not best:
+            best_key = (0, 0, 0)
+            for p in ws.procedures:
+                words = [w for w in re.findall(r"[a-z]+", p["name"].lower())
+                         if len(w) >= 4 and w not in GENERIC_WORDS]
+                hits = sum(1 for w in words if re.search(rf"\b{re.escape(w)}(?:s|es)?\b", q))
+                key = (hits, hits / max(len(words), 1), -len(p["name"]))
+                if hits and key > best_key:
+                    best, best_key = p["name"], key
 
         # the city mentioned LAST wins ("... in Delhi and in Mumbai" -> Mumbai)
         found = []
@@ -292,6 +313,7 @@ class Assistant:
         res = rank(self.ws, flt["treatment"], flt["city"], flt["require"], k=5)
         passages = []
         self._shown = [r["provider"]["id"] for r in res["results"]]
+        self._last_rank = res
         if res["procedure"]:
             pp = self.procedure_passage(res["procedure"]["name"])
             if pp:
@@ -351,15 +373,75 @@ class Assistant:
             ctx["shown_providers"] = m["shown_providers"]
         if m.get("procedure") and m["procedure"] not in ctx["topics"]:
             ctx["topics"].append(m["procedure"])
-        return {"text": text, "sources": sources, "quick_replies": []}
+        return {"text": text, "sources": sources, "quick_replies": m.get("quick_replies", [])}
 
-    # ---------- main entry ----------
+    # ---------- answers that code can write exactly (no LLM) ----------
+    def render_ranking(self, res, flt):
+        ws, proc = self.ws, res["procedure"]
+        where = f" in {flt['city']}" if flt.get("city") else ""
+        acc = (" with " + " and ".join(flt["require"]) + " accreditation") if flt.get("require") else ""
+        lines = [f"Here are the hospitals listed for **{proc['name']}**{where}{acc}, in the directory's "
+                 "scoring order:", ""]
+        sources = []
+        for i, r in enumerate(res["results"], 1):
+            h = r["provider"]
+            facts = [t for _, t, _ in r["reasons"]]
+            if r["price_min"]:
+                facts.append(f"quoted price {ws.money(r['price_min'])} to {ws.money(r['price_max'])}")
+            lines.append(f"**{i}. {h['name']}** ({h['city']}) \u00b7 score {r['score']:.0f}/100")
+            lines.append(" \u00b7 ".join(facts) + (f" \u00b7 not available: {'; '.join(r['missing'])}" if r["missing"] else ""))
+            lines.append("")
+            sources.append((i, h["name"], h.get("url") or ""))
+        summ = self.summary_line(proc)
+        if summ:
+            lines += [summ, ""]
+        advice = ws.config["answers"].get("ranking_advice") or []
+        if advice:
+            lines.append("What to weigh when choosing:")
+            lines += [f"- {a}" for a in advice]
+            lines.append("")
+        lines.append(f"_{ws.config['disclaimer']}_")
+        return "\n".join(lines).strip(), sources
+
+    def fast_fact(self, proc):
+        line = self.summary_line(proc)
+        text = (f"{line} These ranges are approximate and vary by hospital, city, and the individual case."
+                f"\n\nI can compare hospitals for {proc['name']}, or share more detail.")
+        return text, [(1, proc["name"], proc.get("url") or "")]
+
+    # ---------- main entry (timing + a small cache around _answer) ----------
     def answer(self, question, history, doc_type=None):
         """Returns (text, sources, new_history). self.last_route / self.last_meta say how it was answered."""
+        cfg = self.ws.config["answers"]
+        ttl = cfg.get("cache_ttl_s", 0)
+        key = (re.sub(r"\s+", " ", question.lower().strip()), doc_type)
+        now = time.time()
+        hit = self._cache.get(key) if (ttl and not history) else None
+        if hit and now - hit["at"] < ttl:
+            self.last_route = hit["route"]
+            self.last_meta = dict(hit["meta"], cached=True, llm_calls=0,
+                                  timing={"total_s": 0.0, "llm_s": 0.0, "retrieval_s": 0.0})
+            return hit["text"], list(hit["sources"]), [{"role": "user", "content": question},
+                                                       {"role": "assistant", "content": hit["text"]}]
+        t0 = time.perf_counter()
+        self._llm_s = self._ret_s = 0.0
+        text, sources, new_hist = self._answer(question, history, doc_type)
+        m = self.last_meta
+        m["timing"] = {"total_s": round(time.perf_counter() - t0, 3), "llm_s": round(self._llm_s, 3),
+                       "retrieval_s": round(self._ret_s, 3)}
+        if (ttl and not history and m.get("route") in ("recommender", "documents")
+                and not m.get("ungrounded") and not m.get("retried")):
+            if len(self._cache) > 256:
+                self._cache.clear()
+            self._cache[key] = {"at": now, "text": text, "sources": list(sources), "meta": dict(m),
+                                "route": self.last_route}
+        return text, sources, new_hist
+
+    def _answer(self, question, history, doc_type=None):
         self.last_meta = {"route": None, "filters": None, "retried": False,
                           "first_draft_bad": [], "ungrounded": [], "llm_calls": 0,
                           "procedure": None, "city": None, "shown_providers": []}
-        self._shown = []
+        self._shown, self._last_rank = [], None
         if EMERGENCY_PATTERNS.search(question):
             self.last_route = self.last_meta["route"] = "emergency"
             return self.emergency_reply, [], history
@@ -413,7 +495,23 @@ class Assistant:
                         fact_proc = find_procedure(self.ws, kw["treatment"])
                         self.last_route = "documents + procedure summary"
 
+        acfg = self.ws.config["answers"]
+        if (fact_proc and acfg.get("fact_mode") == "fast" and not MORE_DETAIL.search(question)
+                and not FACT_COMPLEX.search(question) and len(question.split()) <= 14):
+            text, sources = self.fast_fact(fact_proc)
+            self.last_meta.update(fast=True, quick_replies=[
+                f"More detail on {fact_proc['name']}", f"Compare hospitals for {fact_proc['name']}",
+                "Have the team call me back"])
+            return text, sources, (history + [{"role": "user", "content": question},
+                                              {"role": "assistant", "content": text}])[-8:]
+
         self.last_meta["shown_providers"] = list(self._shown)
+        if (not no_match and acfg.get("ranking_mode") == "template" and self._last_rank
+                and self._last_rank["results"] and self.last_meta.get("filters")):
+            text, sources = self.render_ranking(self._last_rank, self.last_meta["filters"])
+            self.last_meta.update(templated=True, quick_replies=["Have the team call me back"])
+            return text, sources, (history + [{"role": "user", "content": question},
+                                              {"role": "assistant", "content": text}])[-8:]
         if no_match and note:                    # nothing to rank: say so directly, no LLM needed
             text = (f"{note} You can also contact the {self.ws.config['name']} team for help "
                     "finding the right option.")
@@ -421,8 +519,10 @@ class Assistant:
             return text, [], (history + [{"role": "user", "content": question},
                                          {"role": "assistant", "content": text}])[-8:]
 
+        t_ret = time.perf_counter()
         chunks = [] if no_match else self.retriever.retrieve(
             search_q, k=4 if passages else 5, doc_type=doc_type)
+        self._ret_s += time.perf_counter() - t_ret
         for c in chunks:
             passages.append({"title": c["meta"]["title"], "url": c["meta"]["url"], "text": c["text"]})
 

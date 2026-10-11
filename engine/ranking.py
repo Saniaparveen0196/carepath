@@ -19,6 +19,9 @@ def _result(procedure=None, results=None, note=None):
 
 def find_procedure(ws: Workspace, query):
     q = _norm(query)
+    exact = [p for p in ws.procedures if q and (q == _norm(p["name"]) or q == _norm(p["id"]))]
+    if exact:                                    # an exact name or id always wins over a partial match
+        return exact[0]
     matches = [p for p in ws.procedures if q and (q in _norm(p["name"]) or q in _norm(p["id"]))]
     matches.sort(key=lambda p: (not _norm(p["name"]).startswith(q), len(p["name"])))
     return matches[0] if matches else None

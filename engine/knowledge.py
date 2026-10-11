@@ -4,6 +4,7 @@ import re
 import chromadb
 from rank_bm25 import BM25Okapi
 
+from .vocab import expand_query
 from .workspace import Workspace
 
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
@@ -120,6 +121,7 @@ class Retriever:
             raise FileNotFoundError(f"No index for workspace '{ws.name}'. Run: python cli.py ingest {ws.name}")
         self.embedder = embedder or _default_embedder()
         self.reranker = reranker or _default_reranker()
+        self.synonyms = ws.config.get("retrieval", {}).get("synonyms", {})
         data = self.col.get(include=["documents", "metadatas"])
         self.ids, self.docs, self.metas = data["ids"], data["documents"], data["metadatas"]
         self.bm25 = BM25Okapi([self._tok(d) for d in self.docs])
@@ -130,6 +132,7 @@ class Retriever:
         return re.findall(r"[a-z0-9]+", text.lower())
 
     def retrieve(self, query, k=5, doc_type=None, pool=20):
+        query = expand_query(query, self.synonyms)
         pool = min(pool, len(self.ids))
         q = self.embedder.encode(QUERY_PREFIX + query, normalize_embeddings=True).tolist()
         res = self.col.query(query_embeddings=[q], n_results=pool,

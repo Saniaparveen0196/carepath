@@ -36,6 +36,12 @@ PROCS = [  # id, name, category, cost_min, cost_max, stay_min, stay_max, blurb
      "relieves pressure on nerves in the spine or stabilises unstable vertebrae"),
     ("hair-transplant", "Hair Transplant", "Cosmetic", 50000, 250000, 1, 1,
      "moves hair follicles from denser areas of the scalp to thinning areas"),
+    ("haemorrhoid-surgery", "Haemorrhoid Surgery (Piles)", "General Surgery", 45000, 180000, 1, 2,
+     "treats swollen veins around the anus with minimally invasive techniques"),
+    ("haemorrhoidectomy", "Haemorrhoidectomy (Piles Surgery)", "General Surgery", 45000, 150000, 1, 2,
+     "removes haemorrhoid tissue surgically when other treatments have not worked"),
+    ("hernia-repair-laparoscopic", "Hernia Repair (Laparoscopic)", "General Surgery", 70000, 220000, 1, 2,
+     "repairs a hernia through small keyhole incisions"),
 ]
 
 providers, offers, clinicians, used = [], [], [], set()

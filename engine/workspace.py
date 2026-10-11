@@ -22,6 +22,28 @@ DEFAULT_CONFIG = {
         "missing_penalty": 0.30,    # how much a score depends on data completeness
         "expert_years_cap": 40,
     },
+    "retrieval": {
+        # everyday words -> the terms the documents use. Customers extend this with their own patients' vocabulary.
+        "synonyms": {
+            "fits": "seizures epilepsy", "piles": "haemorrhoids hemorrhoids", "sugar": "diabetes",
+            "bp": "blood pressure hypertension", "operation": "surgery", "tummy": "abdomen abdominal",
+            "tb": "tuberculosis", "gallstones": "gallbladder cholecystectomy",
+            "heart attack": "myocardial infarction", "kidney failure": "renal failure dialysis",
+            "weight loss": "bariatric obesity", "bypass": "cabg coronary artery bypass grafting",
+            "eye lens": "cataract", "appendix": "appendicitis appendectomy",
+        },
+    },
+    "answers": {
+        "ranking_mode": "template",   # "template": ranking answers are written by code (instant, exact); "llm": model rewrites them
+        "fact_mode": "fast",          # "fast": plain cost/stay questions get the directory summary instantly; "llm": always ask the model
+        "cache_ttl_s": 3600,          # repeated first-turn questions are answered from memory (0 = off)
+        "ranking_advice": [
+            "Location, and how easy it is to travel for follow-up visits",
+            "Budget: ask each hospital for a written estimate for your case",
+            "The surgeon's experience with this specific procedure",
+            "Insurance: confirm cashless or network status before admission",
+        ],
+    },
     "handoff": {
         "enabled": True,
         "webhook_url": None,          # the customer's endpoint that receives qualified leads

@@ -12,8 +12,10 @@ Layers (the first four need no models and no API key):
 Cases live in workspaces/<name>/eval/cases.yaml (generated from the workspace data, then editable).
 """
 import copy
+import hashlib
 import io
 import json
+import math
 import logging
 import re
 import statistics
@@ -32,10 +34,11 @@ from .intake import LeadStore, deliver_pending, sign
 from .ranking import find_procedure, rank
 from .workspace import Workspace
 
-LAYERS = ["data", "ranker", "guardrails", "routing", "grounding", "intake", "retrieval", "answers"]
+LAYERS = ["data", "ranker", "guardrails", "routing", "grounding", "intake", "retrieval", "retrieval_hard",
+          "answers"]
 OFFLINE = ["data", "ranker", "guardrails", "routing", "grounding", "intake"]
-DEFAULT_THRESHOLDS = {"data": 1.0, "ranker": 1.0, "guardrails": 1.0, "routing": 0.9, "grounding": 1.0,
-                      "intake": 1.0,
+DEFAULT_THRESHOLDS = {"data": 1.0, "ranker": 1.0, "guardrails": 1.0, "routing": 1.0, "grounding": 1.0,
+                      "intake": 1.0, "retrieval_hard": 0.6,
                       "retrieval": 0.9, "answers": 0.85, "safety_answers": 1.0}
 ADMITS_GAP = re.compile(
     r"(?:do(?:es)?(?:n't| not)|did(?:n't| not)|can(?:not|'t)|could(?:n't| not)|is(?:n't| not)|are(?:n't| not))"
@@ -222,6 +225,7 @@ def generate_cases(ws: Workspace):
         if f.suffix.lower() in {".md", ".txt"}:
             meta, _ = parse_document(f)
             title_to_file[_norm(meta["title"])] = f.relative_to(ws.path / "documents").as_posix()
+    hard = _hard_retrieval_cases(ws)
     retrieval = []
     for proc in _sample([p for p in ws.procedures if _norm(p["name"]) in title_to_file], 16):
         fn = title_to_file[_norm(proc["name"])]
@@ -283,7 +287,70 @@ def generate_cases(ws: Workspace):
          "checks": ["admits_scope"]},
     ]
     return {"meta": {"workspace": ws.name, "generated_at": datetime.now().isoformat(timespec="seconds")},
-            "guardrails": guard, "routing": routing, "retrieval": retrieval, "answers": answers}
+            "guardrails": guard, "routing": routing, "retrieval": retrieval,
+            "retrieval_hard": hard, "answers": answers}
+
+
+def _typo(name, seed):
+    """Deterministic misspelling: swap two letters in the longest word, drop a vowel from another."""
+    words = [w for w in re.findall(r"[a-z]+", name.lower())]
+    h = int(hashlib.md5(seed.encode()).hexdigest(), 16)
+    long_ = sorted(range(len(words)), key=lambda i: -len(words[i]))
+    out = list(words)
+    for rank, i in enumerate(long_[:2]):
+        w = out[i]
+        if rank == 0 and len(w) >= 6:
+            k = 1 + h % (len(w) - 3)
+            out[i] = w[:k] + w[k + 1] + w[k] + w[k + 2:]
+        elif rank == 1 and len(w) >= 5:
+            vowels = [j for j, ch in enumerate(w[1:], 1) if ch in "aeiou"]
+            if vowels:
+                j = vowels[h % len(vowels)]
+                out[i] = w[:j] + w[j + 1:]
+    return " ".join(out)
+
+
+def _hard_retrieval_cases(ws):
+    """Typos and 'masked' content queries: the answer page must be found without its exact name."""
+    from .knowledge import parse_document
+    docs = {}
+    for f in sorted((ws.path / "documents").glob("**/*")):
+        if f.suffix.lower() in {".md", ".txt"}:
+            meta, body = parse_document(f)
+            docs[f.relative_to(ws.path / "documents").as_posix()] = (meta, body)
+    if not docs:
+        return []
+    tok = lambda t: set(re.findall(r"[a-z]{4,}", t.lower()))
+    df = Counter(w for _, body in docs.values() for w in tok(body))
+    n = len(docs)
+    title_file = {_norm(m["title"]): fn for fn, (m, _) in docs.items()}
+
+    cases = []
+    named = [p for p in ws.procedures if _norm(p["name"]) in title_file]
+    for p in _sample(named, 10):
+        q = _typo(p["name"], p["id"])
+        if q != re.sub(r"[^a-z ]", "", p["name"].lower()).strip():
+            cases.append({"id": f"hard-typo-{p['id']}", "kind": "typo", "q": f"{q} cost",
+                          "expect_file": title_file[_norm(p["name"])]})
+
+    masked = []
+    for fn, (meta, body) in sorted(docs.items()):
+        stop = set(re.findall(r"[a-z]{3,}", meta["title"].lower()))
+        best, best_score = None, 0.0
+        for line in re.split(r"(?<=[.!?])\s+|\n+", body):
+            words = line.split()
+            if not 8 <= len(words) <= 45 or re.search(r"callback|cookie|privacy", line, re.I):
+                continue
+            score = sum(math.log(n / df[w]) for w in tok(line))
+            if score > best_score:
+                best, best_score = line, score
+        if best:
+            kept = [w for w in best.split() if re.sub(r"[^a-z]", "", w.lower()) not in stop]
+            if len(kept) >= 6:
+                masked.append({"id": f"hard-masked-{fn.rsplit('.', 1)[0]}", "kind": "masked",
+                               "q": " ".join(kept), "expect_file": fn})
+    cases += _sample(masked, 16)
+    return cases
 
 
 def write_cases(ws, force=False):
@@ -301,7 +368,25 @@ def load_cases(ws):
     f = ws.path / "eval" / "cases.yaml"
     if not f.exists():
         raise FileNotFoundError(f"No eval cases. Run: python cli.py eval-init {ws.name}")
-    return yaml.safe_load(f.read_text(encoding="utf-8"))
+    cases = yaml.safe_load(f.read_text(encoding="utf-8"))
+    # hand-written cases live in eval/manual_cases.yaml, which eval-init never overwrites
+    mf = ws.path / "eval" / "manual_cases.yaml"
+    if mf.exists():
+        try:
+            manual = yaml.safe_load(mf.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as e:
+            raise SystemExit(f"\nThe file {mf} is not valid YAML ({str(e).splitlines()[0]}).\n"
+                             "It must start with a line `retrieval_hard:` followed by indented list items, e.g.\n"
+                             "  retrieval_hard:\n"
+                             "    - {id: manual-1, kind: manual, q: \"your query\", expect_file: treatment-x.md}\n"
+                             "    equivalents: goes at the left margin as its own section.")
+        if not isinstance(manual, dict):
+            raise SystemExit(f"\n{mf} must contain named sections (retrieval_hard:, equivalents:, ...), "
+                             "but it starts with a bare list. Add the `retrieval_hard:` line above your items.")
+        for key, items in manual.items():
+            if isinstance(items, list):
+                cases.setdefault(key, []).extend(items)
+    return cases
 
 
 # ====================================================================== layer: data
@@ -467,6 +552,44 @@ def run_routing(ws, cases, bot):
         if "require" in c and sorted(flt.get("require", [])) != sorted(c["require"]):
             fails.append(f"require {flt.get('require')}, expected {c['require']}")
         rows.append({"id": c["id"], "passed": not fails, "detail": "; ".join(fails), "q": c["q"]})
+
+    # every procedure, in several phrasings, must resolve to itself (catches look-alike names)
+    bad, total = [], 0
+    for p in bot.ws.procedures:
+        for q in (f"what does {p['name']} cost", f"best hospitals for {p['name']} in Delhi",
+                  f"how long is the hospital stay for {p['name'].lower()}"):
+            total += 1
+            got = bot.keyword_filters(q)["treatment"]
+            if got != p["name"]:
+                bad.append(f"{p['name']!r} -> {got!r}")
+    # everyday words must expand to the terms the documents use, but only as whole words
+    from .vocab import expand_query
+    syn = bot.ws.config["retrieval"]["synonyms"]
+    e1 = expand_query("surgery for fits that medicines do not control", syn)
+    e2 = expand_query("health benefits of exercise", syn)
+    e3 = expand_query("epilepsy seizures surgery for fits", syn)
+    vfails = []
+    if not ("seizures" in e1 and "epilepsy" in e1):
+        vfails.append("'fits' did not expand to seizures/epilepsy")
+    if e2 != "health benefits of exercise":
+        vfails.append("expanded inside a longer word ('benefits')")
+    if e3.count("seizures") != 1:
+        vfails.append("repeated a term that was already present")
+    eq = [["a.md", "b.md"], ["x.md", "y.md", "z.md"]]
+    efails = []
+    if expected_set({"expect_file": "a.md"}, eq) != {"a.md", "b.md"}:
+        efails.append("equivalent page not accepted")
+    if expected_set({"expect_file": "q.md"}, eq) != {"q.md"}:
+        efails.append("an unrelated page was widened")
+    if expected_set({"expect_file": "q.md", "expect_files": ["y.md"]}, eq) != {"q.md", "x.md", "y.md", "z.md"}:
+        efails.append("explicit alternatives not honoured")
+    rows.append({"id": "routing-equivalent-pages-are-honoured", "passed": not efails, "detail": "; ".join(efails)})
+
+    rows.append({"id": "routing-everyday-words-expand-for-search", "passed": not vfails,
+                 "detail": "; ".join(vfails)})
+
+    rows.append({"id": "routing-every-procedure-resolves-to-itself", "passed": not bad,
+                 "detail": f"{len(bad)} of {total} wrong, e.g. {bad[:2]}"})
     return rows, {}
 
 
@@ -475,6 +598,9 @@ def run_grounding(ws):
     """Does the safety net around the LLM work?  A scripted fake model gives deliberately bad
     answers; the assistant must still never show an unverified number or drop the listed figures."""
     rows = []
+    real_ws = ws
+    ws = _tmp_ws(real_ws)                      # model-path tests: fast paths and cache switched off
+    ws.config["answers"].update(ranking_mode="llm", fact_mode="llm", cache_ttl_s=0)
 
     def scripted(*answers):
         seq = list(answers)
@@ -547,7 +673,84 @@ def run_grounding(ws):
         if ws.config["disclaimer"][:40] not in text:
             fails.append("ranking disclaimer missing")
         case(f"grounding-ranking-fallback-{pid}", fails)
+
+    # ---- the code-written fast paths (no LLM at all)
+    ws = real_ws
+    counted = lambda reply="MODEL": (lambda h, m, s, j=False: "{}" if j else reply)
+    corpus = corpus_numbers(ws)
+    pid, city_ = pair_for_fast(ws)
+    if pid:
+        proc = next(p for p in ws.procedures if p["id"] == pid)
+        bot = Assistant(ws, _NoRetriever(), llm=counted())
+        q = f"top hospitals for {proc['name']} in {city_}"
+        text, sources, _ = bot.answer(q, [])
+        want = [r["provider"]["name"] for r in rank(ws, proc["name"], city_, k=5)["results"]]
+        pos = [text.find(n) for n in want]
+        fails = []
+        if bot.last_meta["llm_calls"] != 0:
+            fails.append(f"{bot.last_meta['llm_calls']} LLM calls for a ranking answer")
+        if any(p < 0 for p in pos) or pos != sorted(pos):
+            fails.append("providers missing or not in ranking order")
+        if ws.config["disclaimer"][:40] not in text:
+            fails.append("disclaimer missing")
+        stray = sorted({n for n in numbers_in(text) if n > 10 and _r(n) not in corpus and not 1900 <= n <= 2100})
+        if stray:
+            fails.append(f"numbers not from the data: {stray}")
+        if not sources:
+            fails.append("no sources returned")
+        case("fastpath-ranking-is-exact-and-needs-no-llm", fails)
+
+        bot = Assistant(ws, _NoRetriever(), llm=counted())
+        text, sources, _ = bot.answer(f"what does {proc['name']} cost", [])
+        nums = {_r(n) for n in numbers_in(text)}
+        fails = []
+        if bot.last_meta["llm_calls"] != 0:
+            fails.append("LLM called for a plain cost question")
+        for k in ("cost_min", "cost_max"):
+            if proc.get(k) and not any(_r(proc[k] / d) in nums for d in (1, 1e5, 1e7)):
+                fails.append(f"{k} missing")
+        if not any("More detail on" in c for c in bot.last_meta.get("quick_replies", [])):
+            fails.append("no 'More detail' option offered")
+        case("fastpath-cost-answer-is-exact-and-needs-no-llm", fails)
+
+        bot = Assistant(ws, _NoRetriever(), llm=counted("Detailed model answer [1]."))
+        text, _, _ = bot.answer(f"More detail on {proc['name']}", [])
+        case("fastpath-more-detail-asks-the-model",
+             [] if bot.last_meta["llm_calls"] >= 1 and "Detailed model answer" in text else ["did not use the model"])
+
+        bot = Assistant(ws, _NoRetriever(), llm=counted("Detailed model answer [1]."))
+        q1 = f"More detail on {proc['name']}"
+        t1, _, _ = bot.answer(q1, [])
+        t2, _, _ = bot.answer(q1.upper(), [])
+        fails = []
+        if not bot.last_meta.get("cached") or bot.last_meta["llm_calls"] != 0 or t1 != t2:
+            fails.append("repeat question was not served from the cache")
+        case("fastpath-cache-serves-repeat-questions", fails)
+
+        echo = lambda h, m, s, j=False: "{}" if j else "ANSWER FOR: " + m.split("QUESTION:")[-1].strip()[:80]
+        bot = Assistant(ws, _NoRetriever(), llm=echo)
+        a, _, _ = bot.answer(f"More detail on {proc['name']}", [])
+        b, _, _ = bot.answer(f"More detail on {proc['name']} please", [])
+        case("fastpath-cache-never-mixes-up-questions", [] if a != b else ["two different questions got one answer"])
+
+        bot = Assistant(ws, _NoRetriever(), llm=counted("Detailed model answer [1]."))
+        mid = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        bot.answer(f"More detail on {proc['name']}", mid)                 # asked mid-conversation: must not be stored
+        bot.answer(f"More detail on {proc['name']}", [])                  # asked fresh: must not hit a stored answer
+        case("fastpath-cache-ignores-mid-conversation-answers",
+             [] if not bot.last_meta.get("cached") else ["an answer given mid-conversation was reused for a fresh question"])
     return rows, {}
+
+
+def pair_for_fast(ws):
+    """A (procedure, city) with at least two providers, so ordering can actually be checked."""
+    prov = {p["id"]: p for p in ws.providers}
+    count = Counter((o["procedure_id"], prov[o["provider_id"]]["city"]) for o in ws.offers if o["provider_id"] in prov)
+    costed = {p["id"] for p in ws.procedures if p.get("cost_min")}
+    for (pid, city), n in sorted(count.items(), key=lambda kv: (-kv[1], kv[0])):
+        if n >= 2 and pid in costed:
+            return pid, city
+    return next(((pid, city) for (pid, city) in sorted(count) if pid in costed), (None, None))
 
 
 # ====================================================================== layer: intake (offline)
@@ -841,11 +1044,49 @@ def run_intake(ws):
 
 
 # ====================================================================== layer: retrieval
-def run_retrieval(ws, cases, retriever, k=5):
+def expected_set(case, equivalents):
+    """Pages that count as a correct answer: the expected one, any listed alternatives, and every page
+    declared equivalent to them (near-duplicate pages, e.g. 'cholecystectomy' and its laparoscopic twin)."""
+    exp = {case["expect_file"]} | set(case.get("expect_files", []))
+    for group in equivalents:
+        if exp & set(group):
+            exp |= set(group)
+    return exp
+
+
+def run_retrieval_hard(ws, cases, retriever, k=10, equivalents=()):
+    """Same idea as run_retrieval, on queries that do not contain the page's name. A case passes at rank <= 5."""
+    rows, ranks, by_kind = [], [], defaultdict(list)
+    known = {m.get("file") for m in getattr(retriever, "metas", [])}
+    for c in cases:
+        exp = expected_set(c, equivalents)
+        if known and not (exp & known):                     # a mistake in the test, not in the search
+            rows.append({"id": c["id"], "passed": False, "q": c["q"],
+                         "detail": f"test error: no document named {c['expect_file']} in the index"})
+            continue
+        files = [h["meta"].get("file") for h in retriever.retrieve(c["q"], k=k)]
+        r = next((i + 1 for i, f in enumerate(files) if f in exp), None)
+        ranks.append(r)
+        by_kind[c["kind"]].append(r)
+        rows.append({"id": c["id"], "passed": bool(r and r <= 5), "q": c["q"],
+                     "detail": f"rank={r}" if r else f"expected {c['expect_file']}, got {files[:3]}"})
+    n = max(len(ranks), 1)
+    at = lambda xs, j: round(sum(1 for r in xs if r and r <= j) / max(len(xs), 1), 3)
+    mrr = lambda xs: round(sum(1 / r for r in xs if r) / max(len(xs), 1), 3)
+    return rows, {
+        "retrieval_hard_n": len(ranks),
+        "retrieval_hard_hit_at_1": at(ranks, 1), "retrieval_hard_hit_at_3": at(ranks, 3),
+        "retrieval_hard_hit_at_5": at(ranks, 5), "retrieval_hard_mrr": mrr(ranks),
+        "retrieval_hard_by_kind": {k_: {"n": len(v), "hit_at_1": at(v, 1), "hit_at_5": at(v, 5), "mrr": mrr(v)}
+                                   for k_, v in by_kind.items()}}
+
+
+def run_retrieval(ws, cases, retriever, k=5, equivalents=()):
     rows, ranks = [], []
     for c in cases:
+        exp = expected_set(c, equivalents)
         files = [h["meta"].get("file") for h in retriever.retrieve(c["q"], k=k)]
-        rank_ = files.index(c["expect_file"]) + 1 if c["expect_file"] in files else None
+        rank_ = next((i + 1 for i, f in enumerate(files) if f in exp), None)
         ranks.append(rank_)
         rows.append({"id": c["id"], "passed": rank_ is not None, "q": c["q"],
                      "detail": f"rank={rank_}" if rank_ else f"expected {c['expect_file']}, got {files[:3]}"})
@@ -957,6 +1198,8 @@ CHECKS = {"provider_subset": chk_provider_subset, "provider_accredited": chk_pro
 def run_answers(ws, cases, bot, sleep=2.0, progress=None):
     ctx = {"numbers": corpus_numbers(ws)}
     rows, lat, stats = [], [], Counter()
+    stage = {"llm": [], "retrieval": [], "other": []}
+    by_route = defaultdict(list)
     for i, c in enumerate(cases, 1):
         if progress:
             progress(f"  answer {i}/{len(cases)}: {c['q'][:60]}")
@@ -965,6 +1208,13 @@ def run_answers(ws, cases, bot, sleep=2.0, progress=None):
         lat.append(time.time() - t0 - waited)            # product latency, without rate-limit waits
         stats["rate_limit_wait_s"] += waited
         m = bot.last_meta
+        tm = m.get("timing") or {}
+        total = max(lat[-1], 0.0)
+        stage["llm"].append(tm.get("llm_s", 0.0))
+        stage["retrieval"].append(tm.get("retrieval_s", 0.0))
+        stage["other"].append(max(total - tm.get("llm_s", 0.0) - tm.get("retrieval_s", 0.0), 0.0))
+        by_route[("templated" if m.get("templated") else "fast-fact" if m.get("fast")
+                  else "cached" if m.get("cached") else m.get("route"))].append(total)
         stats["llm_calls"] += m.get("llm_calls", 0)
         stats["retried"] += bool(m.get("retried"))
         stats["first_draft_bad"] += bool(m.get("first_draft_bad"))
@@ -994,6 +1244,8 @@ def run_answers(ws, cases, bot, sleep=2.0, progress=None):
         "answers_first_draft_ungrounded_rate": round(stats["first_draft_bad"] / n, 3),
         "answers_retried": stats["retried"],
         "answers_llm_calls_avg": round(stats["llm_calls"] / n, 2),
+        "answers_stage_p50_s": {k: round(statistics.median(v), 2) for k, v in stage.items() if v},
+        "answers_latency_by_path_p50_s": {k: round(statistics.median(v), 2) for k, v in sorted(by_route.items())},
         "answers_rate_limit_wait_s": stats["rate_limit_wait_s"],
         "answers_residual_ungrounded": stats["residual_bad"],
         "routes": dict(Counter(r["route"] for r in rows)),
@@ -1026,7 +1278,11 @@ def run_eval(ws, layers, retriever=None, bot=None, sleep=2.0, progress=print):
         elif layer == "intake":
             results[layer], ex = run_intake(ws)
         elif layer == "retrieval":
-            results[layer], ex = run_retrieval(ws, cases.get("retrieval", []), retriever)
+            results[layer], ex = run_retrieval(ws, cases.get("retrieval", []), retriever,
+                                               equivalents=cases.get("equivalents", []))
+        elif layer == "retrieval_hard":
+            results[layer], ex = run_retrieval_hard(ws, cases.get("retrieval_hard", []), retriever,
+                                                    equivalents=cases.get("equivalents", []))
         elif layer == "answers":
             results[layer], ex = run_answers(ws, cases.get("answers", []), bot, sleep, progress)
         extras.update(ex)

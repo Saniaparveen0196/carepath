@@ -1,19 +1,19 @@
 id,name,city,address,accreditations,rating,reviews,beds,doctors,emergency_24x7,url
 summit-multispeciality-hospital-bengaluru,Summit Multispeciality Hospital,Bengaluru,"13 Example Road, Bengaluru",NABH;JCI,4.2,40,900,40,yes,https://example.org/summit-multispeciality-hospital-bengaluru
-aurora-heart-institute-delhi,Aurora Heart Institute,Delhi,"8 Example Road, Delhi",,4.4,2500,60,40,yes,https://example.org/aurora-heart-institute-delhi
+lakeview-heart-institute-delhi,Lakeview Heart Institute,Delhi,"8 Example Road, Delhi",,4.4,2500,60,40,yes,https://example.org/lakeview-heart-institute-delhi
 sunrise-heart-institute-mumbai,Sunrise Heart Institute,Mumbai,"71 Example Road, Mumbai",NABH;NABL,4.6,9000,60,320,yes,https://example.org/sunrise-heart-institute-mumbai
-harbor-multispeciality-hospital-chennai,Harbor Multispeciality Hospital,Chennai,"74 Example Road, Chennai",NABH;NABL,4.1,2500,250,180,yes,https://example.org/harbor-multispeciality-hospital-chennai
-lakeview-heart-institute-hyderabad,Lakeview Heart Institute,Hyderabad,"41 Example Road, Hyderabad",NABH,4.2,600,900,180,,https://example.org/lakeview-heart-institute-hyderabad
-harbor-super-speciality-hospital-pune,Harbor Super Speciality Hospital,Pune,"3 Example Road, Pune",NABH,4.8,600,120,320,yes,https://example.org/harbor-super-speciality-hospital-pune
-maple-super-speciality-hospital-bengaluru,Maple Super Speciality Hospital,Bengaluru,"18 Example Road, Bengaluru",NABH,4.7,9000,250,180,yes,https://example.org/maple-super-speciality-hospital-bengaluru
-greenfield-heart-institute-delhi,Greenfield Heart Institute,Delhi,"1 Example Road, Delhi",NABH;NABL,4.0,9000,250,320,,https://example.org/greenfield-heart-institute-delhi
-riverside-super-speciality-hospital-mumbai,Riverside Super Speciality Hospital,Mumbai,"27 Example Road, Mumbai",NABH;JCI;NABL,4.3,40,250,320,yes,https://example.org/riverside-super-speciality-hospital-mumbai
-greenfield-super-speciality-hospital-chennai,Greenfield Super Speciality Hospital,Chennai,"47 Example Road, Chennai",NABH;JCI;NABL,4.3,40,500,180,yes,https://example.org/greenfield-super-speciality-hospital-chennai
-greenfield-medical-centre-hyderabad,Greenfield Medical Centre,Hyderabad,"68 Example Road, Hyderabad",NABH;NABL,4.1,21000,60,90,,https://example.org/greenfield-medical-centre-hyderabad
-greenfield-multispeciality-hospital-pune,Greenfield Multispeciality Hospital,Pune,"30 Example Road, Pune",,4.0,2500,250,,yes,https://example.org/greenfield-multispeciality-hospital-pune
-summit-heart-institute-bengaluru,Summit Heart Institute,Bengaluru,"27 Example Road, Bengaluru",NABH;JCI;NABL,4.3,9000,60,180,,https://example.org/summit-heart-institute-bengaluru
-sunrise-super-speciality-hospital-delhi,Sunrise Super Speciality Hospital,Delhi,"93 Example Road, Delhi",NABH;JCI,4.2,2500,60,40,yes,https://example.org/sunrise-super-speciality-hospital-delhi
-willow-multispeciality-hospital-mumbai,Willow Multispeciality Hospital,Mumbai,"14 Example Road, Mumbai",NABH,4.4,120,500,40,yes,https://example.org/willow-multispeciality-hospital-mumbai
-willow-super-speciality-hospital-chennai,Willow Super Speciality Hospital,Chennai,"59 Example Road, Chennai",JCI,4.5,9000,500,320,yes,https://example.org/willow-super-speciality-hospital-chennai
-sunrise-multispeciality-hospital-hyderabad,Sunrise Multispeciality Hospital,Hyderabad,"8 Example Road, Hyderabad",NABH;NABL,4.2,9000,900,320,yes,https://example.org/sunrise-multispeciality-hospital-hyderabad
-willow-heart-institute-pune,Willow Heart Institute,Pune,"79 Example Road, Pune",NABH;NABL,4.9,9000,900,40,,https://example.org/willow-heart-institute-pune
+cedar-medical-centre-chennai,Cedar Medical Centre,Chennai,"32 Example Road, Chennai",NABH,3.9,600,900,180,yes,https://example.org/cedar-medical-centre-chennai
+cedar-super-speciality-hospital-hyderabad,Cedar Super Speciality Hospital,Hyderabad,"74 Example Road, Hyderabad",NABH,4.7,600,250,90,,https://example.org/cedar-super-speciality-hospital-hyderabad
+riverside-heart-institute-pune,Riverside Heart Institute,Pune,"88 Example Road, Pune",NABH;JCI,4.7,600,500,90,yes,https://example.org/riverside-heart-institute-pune
+harbor-multispeciality-hospital-bengaluru,Harbor Multispeciality Hospital,Bengaluru,"64 Example Road, Bengaluru",NABH,3.9,2500,500,320,yes,https://example.org/harbor-multispeciality-hospital-bengaluru
+maple-multispeciality-hospital-delhi,Maple Multispeciality Hospital,Delhi,"30 Example Road, Delhi",NABH;JCI;NABL,3.8,9000,120,90,yes,https://example.org/maple-multispeciality-hospital-delhi
+maple-super-speciality-hospital-mumbai,Maple Super Speciality Hospital,Mumbai,"25 Example Road, Mumbai",NABH;NABL,3.9,120,500,40,yes,https://example.org/maple-super-speciality-hospital-mumbai
+riverside-medical-centre-chennai,Riverside Medical Centre,Chennai,"49 Example Road, Chennai",NABH;JCI;NABL,4.0,600,250,320,yes,https://example.org/riverside-medical-centre-chennai
+harbor-heart-institute-hyderabad,Harbor Heart Institute,Hyderabad,"62 Example Road, Hyderabad",NABH,4.7,120,900,,yes,https://example.org/harbor-heart-institute-hyderabad
+willow-medical-centre-pune,Willow Medical Centre,Pune,"70 Example Road, Pune",NABL,4.7,600,120,320,yes,https://example.org/willow-medical-centre-pune
+harbor-super-speciality-hospital-bengaluru,Harbor Super Speciality Hospital,Bengaluru,"58 Example Road, Bengaluru",NABH,4.7,21000,250,90,yes,https://example.org/harbor-super-speciality-hospital-bengaluru
+aurora-heart-institute-delhi,Aurora Heart Institute,Delhi,"11 Example Road, Delhi",NABH,4.7,40,500,40,yes,https://example.org/aurora-heart-institute-delhi
+riverside-multispeciality-hospital-mumbai,Riverside Multispeciality Hospital,Mumbai,"60 Example Road, Mumbai",NABH;JCI;NABL,4.7,120,900,320,yes,https://example.org/riverside-multispeciality-hospital-mumbai
+greenfield-heart-institute-chennai,Greenfield Heart Institute,Chennai,"76 Example Road, Chennai",NABH;JCI;NABL,4.2,9000,500,40,yes,https://example.org/greenfield-heart-institute-chennai
+cedar-multispeciality-hospital-hyderabad,Cedar Multispeciality Hospital,Hyderabad,"19 Example Road, Hyderabad",NABH;NABL,4.3,21000,60,320,yes,https://example.org/cedar-multispeciality-hospital-hyderabad
+greenfield-multispeciality-hospital-pune,Greenfield Multispeciality Hospital,Pune,"72 Example Road, Pune",NABH,3.8,40,500,90,,https://example.org/greenfield-multispeciality-hospital-pune

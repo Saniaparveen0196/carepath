@@ -55,6 +55,56 @@ MUTANTS = [
      "corpus = context + \" \" + question\n        bad = []"),
     ("assistant: ranking fallback not used when a number is unverified", "engine/assistant.py",
      "return self.ranking_fallback(passages)\n        name = self.ws.config", "return passages[0]['text']\n        name = self.ws.config"),
+    ("intake: consent skipped", "engine/intake.py",
+     "            if is_yes(text):\n                state[\"consent_at\"]", "            if True:\n                state[\"consent_at\"]"),
+    ("intake: phone numbers not validated", "engine/intake.py",
+     "return f\"+91{digits}\" if len(digits) == 10 and digits[0] in \"6789\" else None",
+     "return f\"+91{digits}\" if digits else None"),
+    ("intake: medical text accepted as a name", "engine/intake.py",
+     "if any(w.lower().strip(\".,'\") in NOT_A_NAME for w in words):", "if False:"),
+    ("intake: lead saved without confirmation", "engine/intake.py",
+     "            if is_yes(text):\n                return self._submit(state)", "            if True:\n                return self._submit(state)"),
+    ("intake: conversation transcript leaks into the lead", "engine/intake.py",
+     "\"source\": {\"channel\": \"web-widget\", \"session\": state[\"sid\"]},",
+     "\"source\": {\"channel\": \"web-widget\", \"session\": state[\"sid\"]}, \"transcript\": state[\"topics\"],"),
+    ("intake: full phone number written to the logs", "engine/intake.py",
+     "mask_phone(d[\"phone\"]), d[\"urgency\"])", "d[\"phone\"], d[\"urgency\"])"),
+    ("intake: webhook requests unsigned", "engine/intake.py", "if cfg.get(\"webhook_secret\"):", "if False:"),
+    ("intake: duplicate requests create duplicate leads", "engine/intake.py",
+     "        if dup:\n            ref = dup[\"id\"]", "        if False:\n            ref = dup[\"id\"]"),
+    ("intake: retention purge does nothing", "engine/intake.py",
+     "if now - datetime.fromisoformat(l[\"created_at\"]) > timedelta(days=days):", "if False:"),
+    ("assistant: emergency no longer interrupts intake", "engine/assistant.py",
+     "        if EMERGENCY_PATTERNS.search(question):\n            session[\"intake\"] = None",
+     "        if False:\n            session[\"intake\"] = None"),
+    ("assistant: intake cannot be switched off", "engine/assistant.py",
+     "elif self.ws.config[\"handoff\"][\"enabled\"] and INTAKE_INTENT.search(question):",
+     "elif INTAKE_INTENT.search(question):"),
+    ("assistant: code-written ranking answer drops the disclaimer", "engine/assistant.py",
+     "        lines.append(f\"_{ws.config['disclaimer']}_\")\n        return \"\\n\".join(lines).strip(), sources",
+     "        return \"\\n\".join(lines).strip(), sources"),
+    ("assistant: code-written ranking lists providers in the wrong order", "engine/assistant.py",
+     "        for i, r in enumerate(res[\"results\"], 1):\n            h = r[\"provider\"]\n            facts = [t for _",
+     "        for i, r in enumerate(reversed(res[\"results\"]), 1):\n            h = r[\"provider\"]\n            facts = [t for _"),
+    ("assistant: instant cost answer omits the listed figures", "engine/assistant.py",
+     "        text = (f\"{line} These ranges are approximate", "        text = (f\"Please see the directory. These ranges are approximate"),
+    ("assistant: answer cache ignores the question", "engine/assistant.py",
+     "key = (re.sub(r\"\\s+\", \" \", question.lower().strip()), doc_type)", "key = (\"x\", doc_type)"),
+    ("assistant: answers cached in the middle of a conversation", "engine/assistant.py",
+     "if (ttl and not history and m.get(\"route\") in", "if (ttl and m.get(\"route\") in"),
+    ("assistant: look-alike procedure names confused (the bug found in the real run)", "engine/assistant.py",
+     ["best = max(exact, key=lambda p: len(p[\"name\"]))[\"name\"] if exact else None",
+      "hits = sum(1 for w in words if re.search(rf\"\\b{re.escape(w)}(?:s|es)?\\b\", q))",
+      "key = (hits, hits / max(len(words), 1), -len(p[\"name\"]))"],
+     ["best = None",
+      "hits = sum(1 for w in words if w in q)",
+      "key = (hits, -len(p[\"name\"]), 0)"]),
+    ("vocabulary: everyday words are no longer expanded", "engine/vocab.py",
+     "return query if not extra else query + \" \" + \" \".join(extra)", "return query"),
+    ("vocabulary: terms expanded inside longer words", "engine/vocab.py",
+     "if re.search(rf\"\\b{re.escape(term.lower())}\\b\", q):", "if re.search(rf\"{re.escape(term.lower())}\", q):"),
+    ("eval: equivalent pages no longer accepted as correct", "engine/evaluation.py",
+     "            exp |= set(group)", "            exp |= set()"),
     ("assistant: off-topic scope guard disabled", "engine/assistant.py",
      "if OFFTOPIC_PATTERNS.search(question) and not", "if False and not"),
     ("assistant: recommendation questions no longer routed", "engine/assistant.py",
@@ -89,10 +139,13 @@ for name, rel, old, new in MUTANTS:
         (t / "workspaces" / ws / "eval" / "baseline.json").write_text(BASELINE, encoding="utf-8")
         f = t / rel
         src = f.read_text(encoding="utf-8")
-        if old not in src:
+        pairs = list(zip(old, new)) if isinstance(old, list) else [(old, new)]
+        if any(o not in src for o, _ in pairs):
             print(f"  ??  {name}: pattern not found (update the mutant)")
             continue
-        f.write_text(src.replace(old, new, 1), encoding="utf-8")
+        for o, n in pairs:
+            src = src.replace(o, n, 1)
+        f.write_text(src, encoding="utf-8")
         r = subprocess.run([sys.executable, "cli.py", "eval", ws, "--offline"], cwd=t,
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         failed = [l.split()[0] for l in r.stdout.splitlines() if l.rstrip().endswith("FAIL") and "%" in l]
